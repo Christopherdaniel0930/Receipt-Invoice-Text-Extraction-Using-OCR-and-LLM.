@@ -2,3 +2,4 @@
 *__pycache__
 RE/
 .pytest_cache/
+data/test/
