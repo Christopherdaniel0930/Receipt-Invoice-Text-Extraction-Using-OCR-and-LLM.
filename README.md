@@ -204,6 +204,64 @@ image → RapidOCR → gpt-oss → validation → category model → JSON
 python -m app.main data/test/sample_receipt.txt
 ```
 
+## Run the API
+
+The FastAPI backend exposes an image extraction endpoint and health checks.
+Install the dependencies and configure `.env` as described above, then start the
+development server:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+At API startup, the full-page OCR engine and the separate currency-crop OCR
+engine are initialized once per server process and reused for uploads. The crop
+engine stays separate because its recognition mode would interfere with the
+full-page engine if they shared an instance.
+
+Phase 3 also requires Redis. Set `REDIS_URL` in `.env`, start Redis, and run
+the ARQ worker in a second terminal:
+
+```bash
+arq app.workers.worker.WorkerSettings
+```
+
+By default, the API listens at `http://127.0.0.1:8000`.
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/health` | Liveness check |
+| `GET` | `/ready` | Checks that the Qwen model is configured and the category model exists |
+| `POST` | `/api/v1/receipts` | Validates an image and queues receipt extraction |
+| `GET` | `/api/v1/jobs/{job_id}` | Returns job status and the result when complete |
+
+The extraction endpoint accepts a multipart form upload with the field name
+`file`. JPEG, PNG, and WEBP images up to 10 MB are supported. Upload returns a
+job ID immediately:
+
+```json
+{
+  "job_id": "<job-id>",
+  "status": "queued"
+}
+```
+
+Poll the job endpoint for `QUEUED`, `PROCESSING`, `COMPLETED`, `FAILED`, or
+`REJECTED`. A completed response includes the extracted receipt under `result`.
+API errors use this shape:
+
+```json
+{
+  "status": 400,
+  "error_code": "INVALID_IMAGE",
+  "message": "The uploaded image is corrupted or invalid."
+}
+```
+
+Interactive Swagger documentation is available at `http://127.0.0.1:8000/docs`;
+the OpenAPI schema is at `http://127.0.0.1:8000/openapi.json`. CORS is enabled
+for `http://localhost:5173`.
+
 ## Tests
 
 ```bash

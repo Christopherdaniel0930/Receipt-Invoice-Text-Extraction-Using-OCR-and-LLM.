@@ -1,16 +1,28 @@
 import argparse
+from contextlib import asynccontextmanager
 import json
 import sys
 from pathlib import Path
 
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from arq import create_pool
+from arq.connections import RedisSettings
+
 from app.category_model import predict_category
 from app.currency_recovery import analyse_text, recover_currency, restore_symbols
+from app.currency_recovery import get_engine as get_currency_recovery_engine
 from app.doc_classifier import classify_document #is_receipt_or_invoice
 from app.extractor import extract_receipt
 from app.llm_validator import OllamaGptClient
 from app.ocr import get_engine, read_ocr_rows
 from app.text_normalizer import normalize_ocr_text
 from app.validator import deterministic_validate, normalize_currency, normalize_data, reconcile_totals
+from app.api.routes_receipts import router as receipts_router
+from app.api.routes_jobs import router as jobs_router
+from app.core.config import get_settings
+from app.core.errors import install_error_handlers
+from app.core.logging_config import configure_logging
 
 
 def load_input(path):
@@ -162,6 +174,68 @@ def main():
     args = parser.parse_args()
     result = process(args.input)
     print(json.dumps(result.model_dump(), indent=2, ensure_ascii=False))
+
+
+configure_logging()
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Load each process-wide OCR engine once before serving requests."""
+    get_engine()
+    get_currency_recovery_engine()
+    redis = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+    await redis.ping()
+    api.state.redis = redis
+    try:
+        yield
+    finally:
+        await redis.aclose()
+
+
+api = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
+api.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+install_error_handlers(api)
+api.include_router(receipts_router)
+api.include_router(jobs_router)
+
+
+@api.get("/health", tags=["health"])
+def health():
+    return {"status": "ok"}
+
+
+@api.get("/ready", tags=["health"])
+async def ready():
+    configured = bool(settings.ollama_model)
+    model_available = settings.category_model_path.is_file()
+    redis = getattr(api.state, "redis", None)
+    try:
+        queue_available = redis is not None and bool(await redis.ping())
+    except Exception:
+        queue_available = False
+    if not configured or not model_available or not queue_available:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": 503,
+                "error_code": "NOT_READY",
+                "message": "Required extraction models or queue service are unavailable.",
+            },
+        )
+    return {"status": "ready"}
+
+
+app = api
 
 
 if __name__ == "__main__":
