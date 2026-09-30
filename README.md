@@ -262,6 +262,21 @@ Interactive Swagger documentation is available at `http://127.0.0.1:8000/docs`;
 the OpenAPI schema is at `http://127.0.0.1:8000/openapi.json`. CORS is enabled
 for `http://localhost:5173`.
 
+## Run the React frontend
+
+In another terminal, start the Vite development server:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. The client sends images to the receipt API and
+polls the job status endpoint until extraction is complete. To use a different
+API address, copy `frontend/.env.example` to `frontend/.env.local` and set
+`VITE_API_BASE_URL`.
+
 ## Tests
 
 ```bash
