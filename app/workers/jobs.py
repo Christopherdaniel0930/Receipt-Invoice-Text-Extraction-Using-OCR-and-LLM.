@@ -39,18 +39,32 @@ async def startup(ctx) -> None:
     logger.info("ARQ worker OCR engines initialized")
 
 
+async def _run_pipeline(path: Path):
+    """Keep the input alive until the synchronous pipeline thread has stopped."""
+    from app.main import process
+
+    task = asyncio.create_task(asyncio.to_thread(process, str(path)))
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Cancelling to_thread does not stop its thread. Wait for it before
+            # letting ARQ retry or cleanup remove the image it is reading.
+            if task.done():
+                return task.result()
+            continue
+
+
 async def process_receipt(ctx, receipt_id: str, image_path: str) -> None:
     """Run the established synchronous receipt pipeline as an ARQ job."""
     redis = ctx["redis"]
     path = Path(image_path)
     terminal = True
-    await _save_job(redis, receipt_id, status="PROCESSING")
-    logger.info("Receipt job %s processing started", receipt_id)
-
+    max_tries = int(ctx.get("max_tries", 3))
     try:
-        from app.main import process
-
-        receipt = await asyncio.to_thread(process, str(path))
+        await _save_job(redis, receipt_id, status="PROCESSING")
+        logger.info("Receipt job %s processing started", receipt_id)
+        receipt = await _run_pipeline(path)
         result = receipt.model_dump(mode="json")
         await _save_job(
             redis,
@@ -80,10 +94,29 @@ async def process_receipt(ctx, receipt_id: str, image_path: str) -> None:
                 message="Receipt processing failed.",
             )
             logger.error("Receipt job %s failed (%s)", receipt_id, type(exc).__name__)
+    except asyncio.CancelledError:
+        # ARQ may cancel a timed out attempt. Keep the image for the retry and
+        # avoid leaving a stale PROCESSING status behind.
+        job_try = int(ctx.get("job_try", 1))
+        if job_try < max_tries:
+            terminal = False
+            try:
+                await asyncio.shield(_save_job(redis, receipt_id, status="QUEUED"))
+            except Exception:
+                logger.error("Receipt job %s retry status update failed", receipt_id)
+        else:
+            try:
+                await asyncio.shield(_save_job(
+                    redis, receipt_id, status="FAILED",
+                    error_code="PROCESSING_TIMEOUT",
+                    message="Receipt processing timed out.",
+                ))
+            except Exception:
+                logger.error("Receipt job %s final status update failed", receipt_id)
+        raise
     except Exception as exc:
         if _is_retryable_upstream_error(exc):
             job_try = int(ctx.get("job_try", 1))
-            max_tries = int(ctx.get("max_tries", 3))
             if job_try < max_tries:
                 terminal = False
                 await _save_job(redis, receipt_id, status="QUEUED", error_code="")
@@ -104,4 +137,7 @@ async def process_receipt(ctx, receipt_id: str, image_path: str) -> None:
         logger.error("Receipt job %s failed (%s)", receipt_id, type(exc).__name__)
     finally:
         if terminal:
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("Receipt job %s image cleanup failed (%s)", receipt_id, type(exc).__name__)

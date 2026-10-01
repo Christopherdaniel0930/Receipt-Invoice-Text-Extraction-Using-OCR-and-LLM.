@@ -272,7 +272,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. The client sends images to the receipt API and
+Use Node.js 20.19 or newer. Open `http://localhost:5173`. The client sends images to the receipt API and
 polls the job status endpoint until extraction is complete. To use a different
 API address, copy `frontend/.env.example` to `frontend/.env.local` and set
 `VITE_API_BASE_URL`.

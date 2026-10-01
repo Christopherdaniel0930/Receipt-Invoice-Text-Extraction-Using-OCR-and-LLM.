@@ -41,12 +41,21 @@ def run_job(monkeypatch, tmp_path, result_or_error, *, job_try=1, max_tries=3):
 
 def test_worker_success(monkeypatch, tmp_path):
     image_path, redis, ctx = run_job(
-        monkeypatch, tmp_path, ReceiptData(vendor_name="Shop", total_amount=12.5)
+        monkeypatch, tmp_path, ReceiptData(
+            vendor_name="Shop", total_amount=12.5,
+            line_items=[
+                {"description": "CHILLY PAROTTA", "quantity": 1, "unit_price": 110, "amount": 110},
+                {"description": "TEA", "quantity": 1, "unit_price": 60, "amount": 60},
+                {"description": "WATER", "quantity": 1, "unit_price": 90, "amount": 90},
+            ],
+        )
     )
     asyncio.run(process_receipt(ctx, "receipt-1", str(image_path)))
     state = redis.hashes["receipt-job:receipt-1"]
     assert state["status"] == "COMPLETED"
     assert '"vendor_name": "Shop"' in state["result"]
+    import json
+    assert [item["amount"] for item in json.loads(state["result"])["line_items"]] == [110.0, 60.0, 90.0]
     assert not image_path.exists()
 
 

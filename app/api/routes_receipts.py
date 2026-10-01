@@ -14,6 +14,7 @@ from app.workers.jobs import JOB_TTL_SECONDS, job_key
 router = APIRouter(prefix="/api/v1/receipts", tags=["receipts"])
 logger = logging.getLogger(__name__)
 ALLOWED_FORMATS = {"JPEG", "PNG", "WEBP"}
+MAX_IMAGE_PIXELS = 40_000_000
 
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
@@ -27,6 +28,8 @@ async def submit_receipt(request: Request, file: UploadFile = File(...)):
             image_format = image.format
             if image_format not in ALLOWED_FORMATS:
                 raise ApiError(415, "UNSUPPORTED_IMAGE_TYPE", "Upload a JPEG, PNG, or WEBP image.")
+            if image.width * image.height > MAX_IMAGE_PIXELS:
+                raise ApiError(413, "IMAGE_DIMENSIONS_TOO_LARGE", "Image dimensions are too large to process.")
             image.verify()
     except ApiError:
         raise

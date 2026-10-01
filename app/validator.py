@@ -20,6 +20,7 @@ MONEY_ANCHOR_RE = re.compile(
     re.IGNORECASE,
 )
 GARBLED_LETTER_RATIO = 0.6
+LINE_ITEM_AMOUNT_TOLERANCE = 0.01
 
 
 def normalize_currency(value):
@@ -75,10 +76,22 @@ def normalize_data(data):
     data.tax_amount = normalize_amount(data.tax_amount)
     data.total_amount = normalize_amount(data.total_amount)
     data.invoice_number = clean_invoice_number(data.invoice_number)
-    for item in data.line_items:
+    for index, item in enumerate(data.line_items, start=1):
         item.quantity = normalize_amount(item.quantity)
         item.unit_price = normalize_amount(item.unit_price)
         item.amount = normalize_amount(item.amount)
+        if item.amount is None:
+            if item.quantity is not None and item.unit_price is not None:
+                item.amount = round(item.quantity * item.unit_price, 2)
+        elif item.quantity is not None and item.unit_price is not None:
+            expected = round(item.quantity * item.unit_price, 2)
+            if abs(item.amount - expected) > LINE_ITEM_AMOUNT_TOLERANCE + 1e-9:
+                note = (
+                    f"line item {index} amount {item.amount:.2f} differs from "
+                    f"quantity × unit_price {expected:.2f}"
+                )
+                if note not in data.reconciliation_notes:
+                    data.reconciliation_notes.append(note)
     if data.expense_category not in CATEGORIES:
         data.expense_category = None
     return data

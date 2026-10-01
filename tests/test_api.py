@@ -86,6 +86,18 @@ def test_job_status(fake_redis):
     }
 
 
+def test_job_status_preserves_serialized_line_item_amounts(fake_redis):
+    fake_redis.hashes["receipt-job:amounts"] = {
+        "status": "COMPLETED",
+        "result": '{"line_items":[{"description":"CHILLY PAROTTA","quantity":1,"unit_price":110,"amount":110},{"description":"TEA","quantity":1,"unit_price":60,"amount":60},{"description":"WATER","quantity":1,"unit_price":90,"amount":90}]}',
+        "error_code": "",
+        "message": "",
+    }
+    response = client.get("/api/v1/jobs/amounts")
+    assert response.status_code == 200
+    assert [item["amount"] for item in response.json()["result"]["line_items"]] == [110, 60, 90]
+
+
 def test_unknown_job_status_is_404(fake_redis):
     response = client.get("/api/v1/jobs/missing")
     assert response.status_code == 404

@@ -11,18 +11,18 @@ from arq.connections import RedisSettings
 
 from app.category_model import predict_category
 from app.currency_recovery import analyse_text, recover_currency, restore_symbols
-from app.currency_recovery import get_engine as get_currency_recovery_engine
 from app.doc_classifier import classify_document #is_receipt_or_invoice
 from app.extractor import extract_receipt
 from app.llm_validator import OllamaGptClient
-from app.ocr import get_engine, read_ocr_rows
+from app.ocr import read_ocr_rows
 from app.text_normalizer import normalize_ocr_text
-from app.validator import deterministic_validate, normalize_currency, normalize_data, reconcile_totals
+from app.validator import CATEGORIES, deterministic_validate, normalize_currency, normalize_data, reconcile_totals
 from app.api.routes_receipts import router as receipts_router
 from app.api.routes_jobs import router as jobs_router
 from app.core.config import get_settings
 from app.core.errors import install_error_handlers
 from app.core.logging_config import configure_logging
+from app.core.upload_limits import UploadBodyLimitMiddleware
 
 
 def load_input(path):
@@ -109,7 +109,8 @@ def build_classifier_text(data):
     if data.vendor_name:
         parts.append(data.vendor_name)
     for item in data.line_items:
-        parts.append(item.description)
+        if item.description:
+            parts.append(item.description)
     return " ".join(parts).strip()
 
 
@@ -137,7 +138,7 @@ def process(path):
     # A ticket prints its fare once with no "Total" label, so the model
     # leaves total_amount null. Reconcile against the currency-anchored
     # amounts on the page before anything downstream reads the total.
-    data.reconciliation_notes = reconcile_totals(data, ocr_text)
+    data.reconciliation_notes.extend(reconcile_totals(data, ocr_text))
 
     data.document_type = document["document_type"]
     data.document_confidence = document["confidence"]
@@ -159,7 +160,7 @@ def process(path):
     try:
         category_text = build_classifier_text(data) or ocr_text
         category, confidence = predict_category(category_text)
-        data.expense_category = category
+        data.expense_category = category if category in CATEGORIES else "Other"
         data.classification_confidence = confidence
     except FileNotFoundError:
         data.expense_category = None
@@ -182,19 +183,22 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """Load each process-wide OCR engine once before serving requests."""
-    get_engine()
-    get_currency_recovery_engine()
+    """Connect the API process to Redis; OCR engines live in the worker."""
     redis = await create_pool(RedisSettings.from_dsn(settings.redis_url))
-    await redis.ping()
-    api.state.redis = redis
     try:
+        await redis.ping()
+        api.state.redis = redis
         yield
     finally:
         await redis.aclose()
 
 
 api = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
+api.add_middleware(
+    UploadBodyLimitMiddleware,
+    max_body_bytes=settings.max_upload_bytes + 64 * 1024,
+    path="/api/v1/receipts",
+)
 api.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],

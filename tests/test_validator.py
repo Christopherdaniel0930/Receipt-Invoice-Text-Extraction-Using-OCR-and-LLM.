@@ -27,6 +27,71 @@ def test_data():
     assert x.invoice_date == "2026-09-12" and x.total_amount == 100.0
 
 
+def test_existing_line_item_amount_is_preserved():
+    data = ReceiptData(line_items=[LineItem(
+        description="CHILLY PAROTTA", quantity=1, unit_price=110, amount=110,
+    )])
+    normalize_data(data)
+    assert data.line_items[0].amount == 110.0
+
+
+def test_missing_line_item_amount_is_calculated():
+    data = ReceiptData(line_items=[LineItem(
+        description="CHILLY PAROTTA", quantity=2, unit_price=55, amount=None,
+    )])
+    normalize_data(data)
+    assert data.line_items[0].amount == 110.0
+
+
+def test_missing_quantity_keeps_line_item_amount_null():
+    data = ReceiptData(line_items=[LineItem(
+        description="CHILLY PAROTTA", quantity=None, unit_price=110, amount=None,
+    )])
+    normalize_data(data)
+    assert data.line_items[0].amount is None
+
+
+def test_missing_unit_price_keeps_line_item_amount_null():
+    data = ReceiptData(line_items=[LineItem(
+        description="CHILLY PAROTTA", quantity=1, unit_price=None, amount=None,
+    )])
+    normalize_data(data)
+    assert data.line_items[0].amount is None
+
+
+def test_inconsistent_extracted_line_item_amount_is_preserved_and_noted():
+    data = ReceiptData(line_items=[LineItem(
+        description="CHILLY PAROTTA", quantity=2, unit_price=55, amount=105,
+    )])
+    normalize_data(data)
+    assert data.line_items[0].amount == 105.0
+    assert any("line item 1 amount 105.00 differs" in note for note in data.reconciliation_notes)
+
+
+def test_floating_point_rounding_tolerance_does_not_flag_one_cent_delta():
+    data = ReceiptData(line_items=[LineItem(
+        description="ITEM", quantity=3, unit_price=0.33, amount=1.00,
+    )])
+    normalize_data(data)
+    assert data.line_items[0].amount == 1.0
+    assert data.reconciliation_notes == []
+
+
+def test_ruchii_restaurant_line_items_sum_to_805():
+    data = ReceiptData(line_items=[
+        LineItem(description="CHILLY PAROTTA", quantity=1, unit_price=110, amount=None),
+        LineItem(description="CHAPATHI", quantity=2, unit_price=30, amount=60),
+        LineItem(description="CHK MONIKA", quantity=1, unit_price=210, amount=210),
+        LineItem(description="S.CHK.NOODLS", quantity=1, unit_price=200, amount=200),
+        LineItem(description="PLAAN VANI", quantity=1, unit_price=130, amount=130),
+        LineItem(description="PAROTTA", quantity=3, unit_price=30, amount=90),
+        LineItem(description="PARCEL", quantity=1, unit_price=5, amount=5),
+    ], total_amount=805)
+    normalize_data(data)
+    assert sum(item.amount for item in data.line_items) == 805.0
+    assert data.total_amount == 805.0
+
+
 TICKET_OCR = (
     "Pollachi 3 DEPOT\n"
     "28-09-2026\n"
