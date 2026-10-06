@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from time import perf_counter
 
 from arq.worker import Retry
 from openai import APIConnectionError, APIStatusError, APITimeoutError, InternalServerError, RateLimitError
@@ -34,16 +35,44 @@ async def startup(ctx) -> None:
     from app.currency_recovery import get_engine as get_currency_engine
     from app.ocr import get_engine
 
+    started = perf_counter()
     get_engine()
+    logger.info(
+        "ARQ worker stage=rapidocr_engine_warm elapsed_ms=%.2f",
+        (perf_counter() - started) * 1000,
+    )
+    started = perf_counter()
     get_currency_engine()
+    logger.info(
+        "ARQ worker stage=currency_ocr_engine_warm elapsed_ms=%.2f",
+        (perf_counter() - started) * 1000,
+    )
     logger.info("ARQ worker OCR engines initialized")
 
 
-async def _run_pipeline(path: Path):
+async def _run_pipeline(path: Path, receipt_id: str):
     """Keep the input alive until the synchronous pipeline thread has stopped."""
     from app.main import process
+    from app.core.processing_timing import bind_stage_callback, reset_stage_callback
 
-    task = asyncio.create_task(asyncio.to_thread(process, str(path)))
+    def run_with_timing():
+        def log_stage(stage: str, elapsed_ms: float, succeeded: bool) -> None:
+            result = "completed" if succeeded else "failed"
+            logger.info(
+                "Receipt job %s stage=%s result=%s elapsed_ms=%.2f",
+                receipt_id,
+                stage,
+                result,
+                elapsed_ms,
+            )
+
+        token = bind_stage_callback(log_stage)
+        try:
+            return process(str(path))
+        finally:
+            reset_stage_callback(token)
+
+    task = asyncio.create_task(asyncio.to_thread(run_with_timing))
     while True:
         try:
             return await asyncio.shield(task)
@@ -61,10 +90,11 @@ async def process_receipt(ctx, receipt_id: str, image_path: str) -> None:
     path = Path(image_path)
     terminal = True
     max_tries = int(ctx.get("max_tries", 3))
+    processing_started = perf_counter()
     try:
         await _save_job(redis, receipt_id, status="PROCESSING")
         logger.info("Receipt job %s processing started", receipt_id)
-        receipt = await _run_pipeline(path)
+        receipt = await _run_pipeline(path, receipt_id)
         result = receipt.model_dump(mode="json")
         await _save_job(
             redis,
@@ -136,6 +166,11 @@ async def process_receipt(ctx, receipt_id: str, image_path: str) -> None:
         )
         logger.error("Receipt job %s failed (%s)", receipt_id, type(exc).__name__)
     finally:
+        logger.info(
+            "Receipt job %s stage=worker_processing_total elapsed_ms=%.2f",
+            receipt_id,
+            (perf_counter() - processing_started) * 1000,
+        )
         if terminal:
             try:
                 path.unlink(missing_ok=True)

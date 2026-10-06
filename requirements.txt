@@ -14,3 +14,4 @@ onnxruntime
 openai>=1.0
 python-dotenv>=1.0
 pillow>=10.0
+locust>=2.0

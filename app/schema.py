@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -19,6 +19,9 @@ class ReceiptData(BaseModel):
     total_amount: Optional[float] = None
     expense_category: Optional[str] = None
     classification_confidence: Optional[float] = None
+    ml_confidence: Optional[float] = None
+    strong_evidence_confidence: Optional[float] = None
+    category_source: Optional[Literal["LLM", "Evidence engine", "ML"]] = None
     document_type: Optional[str] = None
     document_confidence: Optional[float] = None
     reconciliation_notes: list[str] = Field(default_factory=list)

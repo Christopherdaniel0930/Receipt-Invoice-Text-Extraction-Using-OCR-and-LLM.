@@ -227,6 +227,56 @@ class OllamaGptClient:
 
         return content
 
+    def evaluate_expense_category(self, ocr_text: str) -> tuple[str | None, float | None]:
+        """Classify from OCR, allowing a new label when the known labels do not fit."""
+        from app.validator import CATEGORIES
+
+        allowed = sorted(CATEGORIES)
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Classify a receipt expense using only its OCR text. "
+                        "Do not infer a category from the merchant name alone. "
+                        "Use an existing category when it accurately describes the "
+                        "expense. If none fits, return a concise new category label. "
+                        "Return JSON with expense_category and confidence from 0 to 1."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Existing categories: {json.dumps(allowed)}\n"
+                        "Return only {\"expense_category\": string, \"confidence\": number}. "
+                        "The category may be a concise new label only if none of the "
+                        "existing categories fits.\n"
+                        f"OCR text:\n{ocr_text}"
+                    ),
+                },
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content
+        if not content:
+            return None, None
+        try:
+            result = json.loads(content)
+            category = result.get("expense_category")
+            confidence = float(result.get("confidence"))
+        except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+            return None, None
+        if (
+            not isinstance(category, str)
+            or not category.strip()
+            or len(category.strip()) > 60
+            or not 0.0 <= confidence <= 1.0
+        ):
+            return None, None
+        return category.strip(), confidence
+
 
 def build_extraction_prompt(ocr: str) -> str:
     """Build the extraction prompt from OCR text."""

@@ -1,6 +1,7 @@
 import argparse
 from contextlib import asynccontextmanager
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -16,13 +17,15 @@ from app.extractor import extract_receipt
 from app.llm_validator import OllamaGptClient
 from app.ocr import read_ocr_rows
 from app.text_normalizer import normalize_ocr_text
-from app.validator import CATEGORIES, deterministic_validate, normalize_currency, normalize_data, reconcile_totals
+from app.validator import deterministic_validate, normalize_currency, normalize_data, reconcile_totals
 from app.api.routes_receipts import router as receipts_router
 from app.api.routes_jobs import router as jobs_router
 from app.core.config import get_settings
 from app.core.errors import install_error_handlers
 from app.core.logging_config import configure_logging
 from app.core.upload_limits import UploadBodyLimitMiddleware
+from app.core.processing_timing import timed_stage
+from app.services.category_evidence import evaluate_category_evidence
 
 
 def load_input(path):
@@ -59,6 +62,9 @@ def recover_stage(path, ocr_text, rows):
 
 
 MIN_FORWARDED_CONFIDENCE = 0.5
+MIN_ML_CATEGORY_CONFIDENCE = 0
+MIN_STRONG_EVIDENCE_CONFIDENCE = 0
+logger = logging.getLogger(__name__)
 
 
 def gate_document(ocr_text):
@@ -114,31 +120,85 @@ def build_classifier_text(data):
     return " ".join(parts).strip()
 
 
+def select_expense_category(ocr_text, classifier_text, gpt_client):
+    """Keep ML when its confident prediction agrees with strong OCR evidence.
+
+    Otherwise ask the configured gpt-oss/Ollama model to evaluate the full OCR
+    text. The evidence rules intentionally do not classify from vendor names.
+    """
+    with timed_stage("category_evidence"):
+        evidence = evaluate_category_evidence(ocr_text)
+    predicted_category = None
+    ml_confidence = None
+    try:
+        with timed_stage("tfidf_logistic_regression"):
+            predicted_category, ml_confidence = predict_category(classifier_text)
+    except Exception as exc:
+        logger.warning("Expense category ML prediction unavailable (%s)", type(exc).__name__)
+
+    strong_evidence = (
+        evidence.strong_rule
+        and evidence.confidence >= MIN_STRONG_EVIDENCE_CONFIDENCE
+    )
+    ml_is_confident = (
+        ml_confidence is not None
+        and ml_confidence >= MIN_ML_CATEGORY_CONFIDENCE
+    )
+    if strong_evidence:
+        if predicted_category == evidence.category and ml_is_confident:
+            return (
+                predicted_category, ml_confidence, "ML", ml_confidence,
+                evidence.confidence,
+            )
+        return (
+            evidence.category, evidence.confidence, "Evidence engine",
+            ml_confidence, evidence.confidence,
+        )
+
+    try:
+        with timed_stage("gpt_oss_category_fallback"):
+            category, confidence = gpt_client.evaluate_expense_category(ocr_text)
+    except Exception as exc:
+        logger.warning("Expense category LLM evaluation unavailable (%s)", type(exc).__name__)
+        return None, None, None, ml_confidence, evidence.confidence
+    if not category or confidence is None:
+        return None, None, None, ml_confidence, evidence.confidence
+    return category, confidence, "LLM", ml_confidence, evidence.confidence
+
+
 def process(path):
-    raw_text, rows = load_input(path)
-    ocr_text = normalize_ocr_text(raw_text)
+    with timed_stage("input_load_and_rapidocr"):
+        raw_text, rows = load_input(path)
+    with timed_stage("ocr_text_normalization"):
+        ocr_text = normalize_ocr_text(raw_text)
     if not ocr_text:
         raise RuntimeError("OCR returned no text")
 
-    recovery = recover_stage(path, ocr_text, rows)
+    with timed_stage("currency_recovery"):
+        recovery = recover_stage(path, ocr_text, rows)
 
     if recovery and recovery["currency"]:
-        ocr_text, _ = restore_symbols(
-            ocr_text,
-            recovery["currency"],
-            recovery["symbol"],
-        )
+        with timed_stage("currency_symbol_restore"):
+            ocr_text, _ = restore_symbols(
+                ocr_text,
+                recovery["currency"],
+                recovery["symbol"],
+            )
 
-    document = gate_document(ocr_text)
+    with timed_stage("receipt_validation"):
+        document = gate_document(ocr_text)
 
-    Gpt = OllamaGptClient()
+    with timed_stage("qwen_client_setup"):
+        Gpt = OllamaGptClient()
     data = extract_receipt(ocr_text, Gpt)
-    data = normalize_data(data)
+    with timed_stage("receipt_data_normalization"):
+        data = normalize_data(data)
 
     # A ticket prints its fare once with no "Total" label, so the model
     # leaves total_amount null. Reconcile against the currency-anchored
     # amounts on the page before anything downstream reads the total.
-    data.reconciliation_notes.extend(reconcile_totals(data, ocr_text))
+    with timed_stage("receipt_reconciliation"):
+        data.reconciliation_notes.extend(reconcile_totals(data, ocr_text))
 
     data.document_type = document["document_type"]
     data.document_confidence = document["confidence"]
@@ -150,21 +210,29 @@ def process(path):
 
 
 
-    errors = deterministic_validate(data)
+    with timed_stage("deterministic_validation"):
+        errors = deterministic_validate(data)
     if errors:
         if any("tax" in error for error in errors):
             data.tax_amount = None
         if any("total" in error for error in errors):
             data.total_amount = None
 
-    try:
-        category_text = build_classifier_text(data) or ocr_text
-        category, confidence = predict_category(category_text)
-        data.expense_category = category if category in CATEGORIES else "Other"
-        data.classification_confidence = confidence
-    except FileNotFoundError:
-        data.expense_category = None
-        data.classification_confidence = None
+    category_text = build_classifier_text(data) or ocr_text
+    (
+        category,
+        confidence,
+        category_source,
+        ml_confidence,
+        evidence_confidence,
+    ) = select_expense_category(
+        ocr_text, category_text, Gpt
+    )
+    data.expense_category = category
+    data.classification_confidence = confidence
+    data.ml_confidence = ml_confidence
+    data.strong_evidence_confidence = evidence_confidence
+    data.category_source = category_source
 
     return data
 

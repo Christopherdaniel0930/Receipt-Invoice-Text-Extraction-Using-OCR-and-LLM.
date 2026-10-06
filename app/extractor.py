@@ -4,6 +4,7 @@ import re
 from app.schema import ReceiptData
 from app.text_normalizer import normalize_ocr_text
 from app.llm_validator import build_extraction_prompt
+from app.core.processing_timing import timed_stage
 
 INVOICE_LABEL_RE = re.compile(
     r"\b(?:invoice\s*(?:no\.?|number|#)?|inv\s*(?:no\.?|number|#)|"
@@ -83,6 +84,8 @@ def extract_receipt(ocr_text: str, gpt_client) -> ReceiptData:
 
     prompt = build_extraction_prompt(clean_text)
 
-    response = gpt_client.extract(prompt)
+    with timed_stage("qwen_request"):
+        response = gpt_client.extract(prompt)
 
-    return parse_gpt_response(response, clean_text)
+    with timed_stage("pydantic_response_parse"):
+        return parse_gpt_response(response, clean_text)
