@@ -19,8 +19,8 @@ from sklearn.model_selection import train_test_split
 
 BASE_DIR = Path(__file__).resolve().parent
 
-DATA_PATH = BASE_DIR / "data" / "train" / "categories.csv"
-MODEL_PATH = BASE_DIR / "models" / "category_model.joblib"
+DATA_PATH = BASE_DIR / "data" / "receipt" / "train" / "categories.csv"
+MODEL_PATH = BASE_DIR / "models" / "receipt" / "category_model.joblib"
 
 
 # =========================================================

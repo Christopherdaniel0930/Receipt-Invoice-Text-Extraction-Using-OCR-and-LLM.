@@ -1,6 +1,6 @@
 from arq.connections import RedisSettings
 
-from app.core.config import get_settings
+from app.common.config import get_settings
 from app.workers.jobs import process_receipt, startup
 
 settings = get_settings()

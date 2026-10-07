@@ -103,7 +103,7 @@ text with the recovered symbol already in place.
 Inspect a single receipt with:
 
 ```bash
-python -m app.currency_recovery data/test/image6.jpeg --evidence
+python -m app.receipt.modules.currency_recovery data/test/image6.jpeg --evidence
 ```
 
 The pixel layer is skipped entirely when the OCR text still carries a currency
@@ -180,10 +180,10 @@ Never commit `.env` to Git.
 python train.py
 ```
 
-This reads `data/train/categories.csv` and writes:
+This reads `data/receipt/train/categories.csv` and writes:
 
 ```text
-models/category_model.joblib
+models/receipt/category_model.joblib
 ```
 
 ## Run on an image

@@ -6,7 +6,7 @@ import pytest
 from arq.worker import Retry
 from openai import APIConnectionError
 
-from app.schema import ReceiptData
+from app.receipt.schemas.schema import ReceiptData
 from app.workers.jobs import process_receipt
 
 

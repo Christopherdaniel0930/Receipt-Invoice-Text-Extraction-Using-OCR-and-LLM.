@@ -10,22 +10,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from arq import create_pool
 from arq.connections import RedisSettings
 
-from app.category_model import predict_category
-from app.currency_recovery import analyse_text, recover_currency, restore_symbols
-from app.doc_classifier import classify_document #is_receipt_or_invoice
-from app.extractor import extract_receipt
-from app.llm_validator import OllamaGptClient
-from app.ocr import read_ocr_rows
-from app.text_normalizer import normalize_ocr_text
-from app.validator import deterministic_validate, normalize_currency, normalize_data, reconcile_totals
-from app.api.routes_receipts import router as receipts_router
+from app.receipt.models.category_model import predict_category
+from app.receipt.modules.currency_recovery import analyse_text, recover_currency, restore_symbols
+from app.classifier.document_classifier import classify_document #is_receipt_or_invoice
+from app.receipt.modules.extractor import extract_receipt
+from app.receipt.modules.llm_validator import OllamaGptClient
+from app.common.ocr import read_ocr_rows
+from app.receipt.modules.text_normalizer import normalize_ocr_text
+from app.receipt.modules.validator import deterministic_validate, normalize_currency, normalize_data, reconcile_totals
+from app.api.routes import router as receipts_router
 from app.api.routes_jobs import router as jobs_router
-from app.core.config import get_settings
-from app.core.errors import install_error_handlers
-from app.core.logging_config import configure_logging
-from app.core.upload_limits import UploadBodyLimitMiddleware
-from app.core.processing_timing import timed_stage
-from app.services.category_evidence import evaluate_category_evidence
+from app.common.config import get_settings
+from app.common.errors import install_error_handlers
+from app.common.logging import configure_logging
+from app.common.upload_limits import UploadBodyLimitMiddleware
+from app.common.processing_timing import timed_stage
+from app.receipt.modules.category_evidence import evaluate_category_evidence
 
 
 def load_input(path):
@@ -40,6 +40,12 @@ def load_input(path):
     if source.suffix.lower() == ".txt":
         return source.read_text(encoding="utf-8"), None
     rows = read_ocr_rows(str(source))
+
+    for block in rows:
+        text = block["text"]
+        conf = block["score"]
+        bbox = block["box"]
+        print(f"Text: {text}")
     return "\n".join(row["text"] for row in rows if row["text"]), rows
 
 
@@ -67,36 +73,22 @@ MIN_STRONG_EVIDENCE_CONFIDENCE = 0
 logger = logging.getLogger(__name__)
 
 
-def gate_document(ocr_text):
-    """Reject the documents that can never be a receipt or an invoice.
-
-    Only the classifier's hard counters veto. A receipt that merely
-    scores too low is left alone: UPI payment screens, bus tickets,
-    bank screenshots and even plain letterheads are real money
-    documents or at least worth reading, they just do not look like a
-    till receipt, and rejecting them would throw away data the
-    extractor handles fine.
+def gate_document(ocr_text, gpt_client=None):
+    """Use the LLM document label to admit receipts/invoices only.
 
     Call this on the patched text, not the raw OCR: a payment screen
     whose only figure is a bare "190" reads as a document with no money
     in it until the recovered symbol is written back next to it.
 
-    Anything that survives is reported at no less than
-    MIN_FORWARDED_CONFIDENCE, so a downstream consumer that filters on
-    confidence keeps the same set of documents that this gate keeps.
-    The raw classifier verdict is left intact alongside it.
-
     Returns the classifier report.
     """
 
-    document = classify_document(ocr_text)
+    document = classify_document(ocr_text, gpt_client)
 
     
-    if document["hard_counters"]:
+    if not document["is_receipt_invoice"]:
         raise RuntimeError(
-            "the image is not a receipt or invoice ("
-            + ", ".join(document["hard_counters"])
-            + ")"
+            "unsupported document type: " + document["document_type"]
         )
 
     document["confidence"] = max(
@@ -185,11 +177,10 @@ def process(path):
                 recovery["symbol"],
             )
 
-    with timed_stage("receipt_validation"):
-        document = gate_document(ocr_text)
-
     with timed_stage("qwen_client_setup"):
         Gpt = OllamaGptClient()
+    with timed_stage("document_classification"):
+        document = gate_document(ocr_text, Gpt)
     data = extract_receipt(ocr_text, Gpt)
     with timed_stage("receipt_data_normalization"):
         data = normalize_data(data)

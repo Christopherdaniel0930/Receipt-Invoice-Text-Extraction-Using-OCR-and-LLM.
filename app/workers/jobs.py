@@ -32,8 +32,8 @@ async def _save_job(redis, receipt_id: str, **fields) -> None:
 
 async def startup(ctx) -> None:
     """Warm the worker's two process-local OCR engines once."""
-    from app.currency_recovery import get_engine as get_currency_engine
-    from app.ocr import get_engine
+    from app.receipt.modules.currency_recovery import get_engine as get_currency_engine
+    from app.common.ocr import get_engine
 
     started = perf_counter()
     get_engine()
@@ -53,7 +53,7 @@ async def startup(ctx) -> None:
 async def _run_pipeline(path: Path, receipt_id: str):
     """Keep the input alive until the synchronous pipeline thread has stopped."""
     from app.main import process
-    from app.core.processing_timing import bind_stage_callback, reset_stage_callback
+    from app.common.processing_timing import bind_stage_callback, reset_stage_callback
 
     def run_with_timing():
         def log_stage(stage: str, elapsed_ms: float, succeeded: bool) -> None:

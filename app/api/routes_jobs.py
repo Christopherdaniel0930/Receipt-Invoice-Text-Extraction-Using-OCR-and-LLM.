@@ -2,7 +2,7 @@ import json
 
 from fastapi import APIRouter, Request
 
-from app.core.errors import ApiError
+from app.common.errors import ApiError
 from app.workers.jobs import job_key
 
 router = APIRouter(prefix="/api/v1/jobs", tags=["jobs"])
