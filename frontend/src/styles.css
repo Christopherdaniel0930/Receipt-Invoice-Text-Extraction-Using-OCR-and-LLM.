@@ -96,12 +96,23 @@ h2 { margin-top: 7px; color: #20283a; font: 700 20px Manrope, sans-serif; letter
 .job-progress > div span, .terminal-state > div span { color: #929aaa; font-size: 9px; }
 .state-pill { padding: 5px 7px; border-radius: 5px; color: #776cb5; background: #f0efff; font-size: 8px; font-weight: 700; letter-spacing: .5px; }
 .state-completed { color: #338969; background: #e4f7ee; }
+.state-failed, .state-rejected { color: #a34d48; background: #fff0ef; }
 .progress-spinner, .button-spinner { width: 13px; height: 13px; display: block; border: 1.7px solid #d5d2fa; border-top-color: #6759df; border-radius: 50%; animation: spin .75s linear infinite; }
 .button-spinner { width: 12px; height: 12px; border-color: #ffffff65; border-top-color: #fff; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .terminal-state { margin-top: 21px; padding: 14px; display: flex; align-items: center; gap: 10px; border: 1px solid #f4d7d4; border-radius: 10px; background: #fff9f8; }
 .terminal-icon { width: 27px; height: 27px; flex: 0 0 27px; display: grid; place-items: center; border-radius: 50%; color: #ae514b; background: #fbe7e4; font-size: 12px; font-weight: 700; }
 .receipt-result { margin-top: 16px; }
+.upload-actions { display: flex; align-items: center; gap: 8px; }
+.reset-button { margin-top: 0; }
+.business-card-result, .dynamic-fields { margin-top: 17px; }
+.business-card-result h3, .dynamic-fields h3 { margin: 0 0 9px; color: #495164; font: 600 11px "DM Sans", sans-serif; }
+.field-grid { margin: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.field-item { min-width: 0; padding: 10px 11px; border: 1px solid #eef0f5; border-radius: 8px; background: #fff; }
+.field-item dt { color: #9ba2b0; font-size: 8px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; }
+.field-item dd { margin: 5px 0 0; overflow-wrap: anywhere; color: #394355; font-size: 11px; font-weight: 600; }
+.field-wide { grid-column: 1 / -1; }
+.empty-result { margin-top: 16px; color: #8790a2; font-size: 11px; }
 .summary-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .summary-item { min-width: 0; min-height: 58px; padding: 10px 11px; display: flex; flex-direction: column; justify-content: center; gap: 5px; border: 1px solid #eef0f5; border-radius: 8px; background: #fff; }
 .summary-wide { grid-column: 1 / -1; }

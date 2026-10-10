@@ -1,13 +1,13 @@
 from arq.connections import RedisSettings
 
 from app.common.config import get_settings
-from app.workers.jobs import process_receipt, startup
+from app.workers.jobs import process_document, process_receipt, startup
 
 settings = get_settings()
 
 
 class WorkerSettings:
-    functions = [process_receipt]
+    functions = [process_receipt, process_document]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 1
     max_tries = 3

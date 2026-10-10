@@ -15,7 +15,7 @@ from locust import HttpUser, between, task
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_IMAGE = PROJECT_ROOT / "data" / "test" / "image5.jpeg"
+DEFAULT_IMAGE = PROJECT_ROOT / "data" /"receipt"/ "test" / "image5.jpeg"
 IMAGE_PATH = Path(os.getenv("data/test/", str(DEFAULT_IMAGE)))
 MAX_PENDING_JOBS = int(os.getenv("MAX_PENDING_JOBS", "500"))
 

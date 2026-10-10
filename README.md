@@ -1,150 +1,66 @@
-# Receipt / Invoice Information Extraction
+# Receipt, Invoice, and Business Card Extraction
 
-A simple receipt and invoice extraction pipeline using **RapidOCR + Ollama/gpt-oss + Pydantic + TF-IDF/Logistic Regression**.
+An image extraction service built with shared RapidOCR, document classification, separate Receipt/Invoice and Business Card pipelines, Ollama-compatible LLM extraction, Pydantic validation, and an ARQ worker.
 
-## Architecture
+## Current workflow
 
 ```text
-IMAGE
-  ↓
-RapidOCR (PP-OCRv6 ONNX)
-  ↓
-Raw OCR Text
-  ↓
-OCR Text Normalization
-  ↓
-Currency Recovery (symbol / lookalike / locale / glyph crop)
-  ↓
-Symbol restored into the amounts
-  ↓
-Document gate (hard-counter veto only, on the restored text)
-  ↓
-Ollama + gpt-oss
-  ↓
-Structured ReceiptData
-  ↓
-Pydantic + deterministic validation
-  ↓
-TF-IDF + Logistic Regression
-  ↓
-Expense Category
-  ↓
-Final JSON
+Image upload
+    |
+    v
+FastAPI upload validation and temporary file
+    |
+    v
+Redis / ARQ process_document job
+    |
+    v
+app.common.document_pipeline
+    |
+    +-- app.common.ocr.read_ocr_rows (one full-page OCR pass)
+    |
+    +-- normalize OCR text and run receipt currency recovery
+    |
+    +-- app.classifier.document_classifier (once)
+            |
+            +-- business_card --> app.business_card.pipeline
+            |
+            +-- receipt_invoice --> app.main receipt processing
+            |
+            +-- unknown --> rejected; no extraction pipeline runs
 ```
 
-## Responsibilities
+The shared orchestrator passes the OCR rows and text to the selected pipeline. The Business Card pipeline does not OCR again. Receipt processing receives the prepared text, rows, currency recovery result, classification, and same LLM client, preserving its extraction, validation, and category stages.
 
-### RapidOCR
-Only performs OCR: image → text.
+The full-page RapidOCR engine is cached in `app/common/ocr.py` and reused within a process. Receipt currency recovery retains its existing separate crop-recognition engine because its recognition mode affects engine state. The ARQ worker keeps `max_jobs = 1` to limit model and image memory use.
 
-### OCR normalization
-Removes unnecessary whitespace, blank lines, and consecutive duplicate lines without changing meaning.
+## Extraction pipelines
 
-### Ollama + gpt-oss
-Converts messy OCR text into structured fields:
+### Business Card
 
-- vendor
-- invoice number
-- date
-- tax
-- total
-- currency
-- line items
+`app/business_card/pipeline.py` performs deterministic contact extraction, LLM extraction of semantic fields, merging, and Pydantic validation. Its output fields are:
 
-gpt-oss is **not** used for expense classification.
+- name
+- designation
+- company_name
+- phone
+- fax
+- email
+- website
+- address
 
-### Document gate
-`app/doc_classifier.py` scores the OCR text against receipt/invoice rules and
-rejects the document before any LLM call is made — but **only** on its hard
-counters: identity documents, personal letters, CVs, legal contracts, news
-articles, and business cards. Those can never be a receipt.
+Unknown fields remain `null`.
 
-A low score does **not** reject. UPI payment screens, card-payment screenshots,
-bus tickets and bank confirmations score poorly because they do not look like a
-till receipt, and on the sample corpus a full `is_receipt_invoice` gate rejected
-7 of 22 genuine money documents. Bank statements are a soft counter and are not
-vetoed either, because a statement that is really a payment confirmation still
-has a total worth extracting. The verdict is reported as `document_type` and
-`document_confidence` in the output JSON.
+### Receipt and Invoice
 
-`business_card` is a combined rule rather than a keyword: a page needs two or
-more contact markers (phone, fax, email, website, or a company suffix) **and** no
-money at all. A phone number alone proves nothing, since real receipts print
-those too. The money half of the test uses the structural `has_money` signal
-rather than the raw amount count, because an invoice can print its figures as
-bare integers (`10 1000 10000`) that carry no symbol or decimal point and so are
-never counted by `AMOUNT_RE`. On the corpus this vetoes the four letterheads and
-business cards and nothing else.
+The established Receipt/Invoice flow performs OCR text normalization, currency recovery and symbol restoration, document gating, LLM extraction, Pydantic validation, total reconciliation, and expense category selection. Receipt extraction behavior remains separate from the Business Card pipeline.
 
-Anything that survives the gate is reported at no less than
-`MIN_FORWARDED_CONFIDENCE` (0.50) in `document_confidence`, so a consumer that
-filters on confidence keeps exactly the same set of documents the gate keeps.
-A document that scores well keeps its own higher confidence, and the raw
-`is_receipt_invoice` boolean is left untouched.
-
-### Currency recovery
-OCR routinely drops currency symbols. Before gpt-oss runs, `app/currency_recovery.py`
-scores the surviving evidence — a symbol or ISO code in the text, a letter that a
-symbol may have been flattened into, regional markers, and a re-read of the ink
-cropped from just left of each amount — and writes the recovered symbol back into
-the amounts that lost it. gpt-oss then reads the patched text, and the recovered ISO
-code is only used as a fallback when gpt-oss returns no currency at all. The layer
-never fails an extraction: if it errors, the pipeline continues without it.
-
-When a page contains no money-shaped number at all — a UPI screen whose only
-figure is a bare `190` — a standalone short figure is marked as well, because
-such a receipt otherwise reads as a document with no total in it and is
-classified as `unknown`. The rule is deliberately narrow: it only fires when the
-page has no decimal or grouped amount, and only on a line that is nothing but a
-short integer, so a 12-digit UPI transaction id or a bank account is never
-marked. This happens before the document gate runs, so the classifier judges the
-text with the recovered symbol already in place.
-
-Inspect a single receipt with:
+The category model is TF-IDF plus Logistic Regression. Train it with:
 
 ```bash
-python -m app.receipt.modules.currency_recovery data/test/image6.jpeg --evidence
+python train.py
 ```
 
-The pixel layer is skipped entirely when the OCR text still carries a currency
-symbol, since a symbol that survived has nothing to recover. It also runs on its
-own RapidOCR instance, because a `use_det=False` call corrupts whichever engine
-it runs on: sharing one engine with the full-image pass makes every later
-receipt in a batch OCR as empty.
-
-### Pydantic
-Enforces the structured application schema.
-
-### Validation
-Performs deterministic checks such as negative amounts and tax greater than total.
-
-It also reconciles the total against the page, because a toll ticket prints its
-fare once with no `Total` label and the model correctly returns `total_amount:
-null` rather than promoting an unlabelled number. `reconcile_totals()` in
-`app/validator.py` then takes the total from the single line item, from the line
-item sum, or from the only currency-anchored amount on the page.
-
-A line item whose description is mostly OCR damage is dropped first. A ticket
-can read back as `ADU4T (S)343)-R`, and the amount beside it is part of the
-same damage: the model returned `5729.00` as both the line price and the total
-when the real fare was `129.00`. When a total matches a price that was just
-rejected as damage, it is cleared and re-derived, because an amount whose
-currency symbol only exists because recovery patched one onto a garbled line is
-not evidence of a total. Every change is recorded in `reconciliation_notes`, so a
-filled-in total is distinguishable from one the model stated.
-
-### Expense classifier
-A trainable **TF-IDF + Logistic Regression** model predicts:
-
-- Food
-- Travel
-- Fuel
-- Electronics
-- Office Supplies
-- Accommodation
-- Healthcare
-- Utilities
-- Other
+Training reads `data/receipt/train/categories.csv` and writes `models/receipt/category_model.joblib`.
 
 ## Setup
 
@@ -154,90 +70,42 @@ Python 3.11 or 3.12 is recommended.
 pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env` and configure your Ollama endpoint, API key, and gpt-oss model.
-
-### Ollama Cloud/API
-
-```env
-OLLAMA_BASE_URL=https://ollama.com/v1
-OLLAMA_API_KEY=your_key
-OLLAMA_MODEL=your-model-name
-```
-
-### Local Ollama
+Copy `.env.example` to `.env` and configure the Ollama-compatible endpoint, API key, and model:
 
 ```env
 OLLAMA_BASE_URL=http://localhost:11434/v1
 OLLAMA_API_KEY=ollama
 OLLAMA_MODEL=qwen3:8b
+REDIS_URL=redis://localhost:6379/0
 ```
 
-Never commit `.env` to Git.
+For a hosted Ollama-compatible endpoint, set `OLLAMA_BASE_URL`, `OLLAMA_API_KEY`, and `OLLAMA_MODEL` to the provider values. Never commit `.env` to Git.
 
-## Train the expense classifier
+## Run the backend
 
-```bash
-python train.py
-```
-
-This reads `data/receipt/train/categories.csv` and writes:
-
-```text
-models/receipt/category_model.joblib
-```
-
-## Run on an image
-
-```bash
-python -m app.main data/test/image.jpg
-```
-
-The program runs:
-
-```text
-image → RapidOCR → gpt-oss → validation → category model → JSON
-```
-
-## Run with OCR text
-
-```bash
-python -m app.main data/test/sample_receipt.txt
-```
-
-## Run the API
-
-The FastAPI backend exposes an image extraction endpoint and health checks.
-Install the dependencies and configure `.env` as described above, then start the
-development server:
+Start Redis, then run the API and ARQ worker in separate terminals:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-At API startup, the full-page OCR engine and the separate currency-crop OCR
-engine are initialized once per server process and reused for uploads. The crop
-engine stays separate because its recognition mode would interfere with the
-full-page engine if they shared an instance.
-
-Phase 3 also requires Redis. Set `REDIS_URL` in `.env`, start Redis, and run
-the ARQ worker in a second terminal:
-
 ```bash
 arq app.workers.worker.WorkerSettings
 ```
 
-By default, the API listens at `http://127.0.0.1:8000`.
+The API listens at `http://127.0.0.1:8000` by default. Interactive API docs are at `/docs`; the OpenAPI schema is at `/openapi.json`.
+
+## API endpoints
 
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/health` | Liveness check |
-| `GET` | `/ready` | Checks that the Qwen model is configured and the category model exists |
-| `POST` | `/api/v1/receipts` | Validates an image and queues receipt extraction |
-| `GET` | `/api/v1/jobs/{job_id}` | Returns job status and the result when complete |
+| `GET` | `/ready` | Checks required model, category model, and Redis readiness |
+| `POST` | `/api/v1/documents` | Validates an image and queues unified document processing |
+| `POST` | `/api/v1/receipts` | Backward-compatible receipt-only upload and job |
+| `GET` | `/api/v1/jobs/{job_id}` | Returns status, type, result, or error |
 
-The extraction endpoint accepts a multipart form upload with the field name
-`file`. JPEG, PNG, and WEBP images up to 10 MB are supported. Upload returns a
-job ID immediately:
+Both upload endpoints accept multipart form data with the field name `file`. Supported formats are JPEG, PNG, and WEBP, up to 10 MB and 40 million pixels. Upload returns a job ID immediately:
 
 ```json
 {
@@ -246,25 +114,34 @@ job ID immediately:
 }
 ```
 
-Poll the job endpoint for `QUEUED`, `PROCESSING`, `COMPLETED`, `FAILED`, or
-`REJECTED`. A completed response includes the extracted receipt under `result`.
-API errors use this shape:
+Poll `/api/v1/jobs/{job_id}` for `QUEUED`, `PROCESSING`, `COMPLETED`, `REJECTED`, or `FAILED`. Generalized document job results include the detected type and typed result. For example:
 
 ```json
 {
-  "status": 400,
-  "error_code": "INVALID_IMAGE",
-  "message": "The uploaded image is corrupted or invalid."
+  "job_id": "<job-id>",
+  "status": "COMPLETED",
+  "document_type": "business_card",
+  "result": {
+    "document_type": "business_card",
+    "result": {
+      "name": "Ada Lovelace",
+      "designation": "Engineer",
+      "company_name": "Analytical Engines",
+      "phone": null,
+      "fax": null,
+      "email": "ada@example.com",
+      "website": null,
+      "address": null
+    }
+  }
 }
 ```
 
-Interactive Swagger documentation is available at `http://127.0.0.1:8000/docs`;
-the OpenAPI schema is at `http://127.0.0.1:8000/openapi.json`. CORS is enabled
-for `http://localhost:5173`.
+For a receipt or invoice, `document_type` is `receipt_invoice`, and the nested result uses the existing Receipt schema. Unknown documents are rejected and do not enter either extraction pipeline. Upload/API errors use an `error_code` and human-readable `message`.
+
+The legacy `/api/v1/receipts` endpoint continues to enqueue `process_receipt` and keeps its receipt-specific result format. Use `/api/v1/documents` for new integrations.
 
 ## Run the React frontend
-
-In another terminal, start the Vite development server:
 
 ```bash
 cd frontend
@@ -272,12 +149,20 @@ npm install
 npm run dev
 ```
 
-Use Node.js 20.19 or newer. Open `http://localhost:5173`. The client sends images to the receipt API and
-polls the job status endpoint until extraction is complete. To use a different
-API address, copy `frontend/.env.example` to `frontend/.env.local` and set
-`VITE_API_BASE_URL`.
+Use Node.js 20.19 or newer, then open `http://localhost:5173`. The frontend uploads to `/api/v1/documents`, polls the shared job-status endpoint, and displays Business Card or Receipt/Invoice results according to `document_type`. Configure the backend address with `VITE_API_BASE_URL` in `frontend/.env.local`; `frontend/.env.example` contains the local default.
+
+## Run the legacy Receipt/Invoice CLI
+
+```bash
+python -m app.main data/receipt/test/image6.jpeg
+```
+
+The CLI accepts an image or OCR text file and runs the existing Receipt/Invoice flow. Unified Business Card routing is exposed through `/api/v1/documents`.
 
 ## Tests
 
+Run the full backend test suite with:
+
 ```bash
 pytest -v
+```

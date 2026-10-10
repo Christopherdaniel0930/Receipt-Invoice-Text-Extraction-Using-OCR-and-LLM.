@@ -18,7 +18,7 @@ from app.receipt.modules.llm_validator import OllamaGptClient
 from app.common.ocr import read_ocr_rows
 from app.receipt.modules.text_normalizer import normalize_ocr_text
 from app.receipt.modules.validator import deterministic_validate, normalize_currency, normalize_data, reconcile_totals
-from app.api.routes import router as receipts_router
+from app.api.routes import documents_router, router as receipts_router
 from app.api.routes_jobs import router as jobs_router
 from app.common.config import get_settings
 from app.common.errors import install_error_handlers
@@ -41,11 +41,6 @@ def load_input(path):
         return source.read_text(encoding="utf-8"), None
     rows = read_ocr_rows(str(source))
 
-    for block in rows:
-        text = block["text"]
-        conf = block["score"]
-        bbox = block["box"]
-        print(f"Text: {text}")
     return "\n".join(row["text"] for row in rows if row["text"]), rows
 
 
@@ -65,6 +60,26 @@ def recover_stage(path, ocr_text, rows):
             file=sys.stderr,
         )
         return None
+
+
+def prepare_document_input(path, raw_text, rows):
+    """Apply the receipt pipeline's existing text and currency preparation.
+
+    The shared document router calls this before classification so receipt
+    classification sees the same restored OCR text as the legacy flow.
+    """
+    ocr_text = normalize_ocr_text(raw_text)
+    if not ocr_text:
+        raise RuntimeError("OCR returned no text")
+
+    with timed_stage("currency_recovery"):
+        recovery = recover_stage(path, ocr_text, rows)
+    if recovery and recovery["currency"]:
+        with timed_stage("currency_symbol_restore"):
+            ocr_text, _ = restore_symbols(
+                ocr_text, recovery["currency"], recovery["symbol"]
+            )
+    return ocr_text, recovery
 
 
 MIN_FORWARDED_CONFIDENCE = 0.5
@@ -158,29 +173,41 @@ def select_expense_category(ocr_text, classifier_text, gpt_client):
     return category, confidence, "LLM", ml_confidence, evidence.confidence
 
 
-def process(path):
-    with timed_stage("input_load_and_rapidocr"):
-        raw_text, rows = load_input(path)
-    with timed_stage("ocr_text_normalization"):
-        ocr_text = normalize_ocr_text(raw_text)
+def process(
+    path,
+    *,
+    ocr_text=None,
+    ocr_rows=None,
+    llm_client=None,
+    document=None,
+    recovery=None,
+    preprocessed=False,
+):
+    """Run receipt extraction, optionally reusing shared OCR/classification."""
+    if ocr_text is None:
+        with timed_stage("input_load_and_rapidocr"):
+            raw_text, ocr_rows = load_input(path)
+    else:
+        raw_text = ocr_text
+
+    if preprocessed:
+        prepared_text = raw_text
+    else:
+        with timed_stage("ocr_text_normalization"):
+            prepared_text, recovery = prepare_document_input(path, raw_text, ocr_rows)
+    ocr_text = prepared_text
     if not ocr_text:
         raise RuntimeError("OCR returned no text")
 
-    with timed_stage("currency_recovery"):
-        recovery = recover_stage(path, ocr_text, rows)
-
-    if recovery and recovery["currency"]:
-        with timed_stage("currency_symbol_restore"):
-            ocr_text, _ = restore_symbols(
-                ocr_text,
-                recovery["currency"],
-                recovery["symbol"],
-            )
-
     with timed_stage("qwen_client_setup"):
-        Gpt = OllamaGptClient()
-    with timed_stage("document_classification"):
-        document = gate_document(ocr_text, Gpt)
+        Gpt = llm_client if llm_client is not None else OllamaGptClient()
+    if document is None:
+        with timed_stage("document_classification"):
+            document = gate_document(ocr_text, Gpt)
+    elif not document.get("is_receipt_invoice"):
+        raise RuntimeError(
+            "unsupported document type: " + str(document.get("document_type", "unknown"))
+        )
     data = extract_receipt(ocr_text, Gpt)
     with timed_stage("receipt_data_normalization"):
         data = normalize_data(data)
@@ -259,6 +286,11 @@ api.add_middleware(
     path="/api/v1/receipts",
 )
 api.add_middleware(
+    UploadBodyLimitMiddleware,
+    max_body_bytes=settings.max_upload_bytes + 64 * 1024,
+    path="/api/v1/documents",
+)
+api.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
     allow_credentials=True,
@@ -267,6 +299,7 @@ api.add_middleware(
 )
 install_error_handlers(api)
 api.include_router(receipts_router)
+api.include_router(documents_router)
 api.include_router(jobs_router)
 
 

@@ -33,6 +33,10 @@ class FakeGpt:
         self.prompts.append(prompt)
         return json.dumps(self.payload)
 
+    def classify_document(self, ocr_text):
+        """These pipeline fixtures are known receipt inputs."""
+        return {"document_type": "receipt_invoice", "confidence": 1.0}
+
 
 def _stub_pipeline(monkeypatch, payload, category=("Food", 0.9)):
     fake_gpt = FakeGpt(payload)

@@ -2,7 +2,7 @@ import pytest
 
 from app.receipt.modules.currency_recovery import restore_symbols
 from app.classifier.document_classifier import classify_document
-from app.main import MIN_FORWARDED_CONFIDENCE, gate_document
+from app.main import gate_document
 from app.receipt.schemas.schema import ReceiptData
 
 UPI_SCREENSHOT = """UPI transaction ID
@@ -51,22 +51,20 @@ def test_a_retail_receipt_passes_the_gate():
 
 
 @pytest.mark.parametrize("text", [UPI_SCREENSHOT, BUS_TICKET, CARD_PAYMENT_SCREEN])
-def test_money_screens_and_tickets_still_reach_the_llm(text):
-    report = gate_document(text)
-
-    assert report["hard_counters"] == []
-    assert report["is_receipt_invoice"] is False, (
-        "these score too low but are still real money documents"
-    )
-
-
-def test_a_low_score_receipt_is_not_rejected():
-    # The classifier is not confident, but nothing vetoes it.
-    report = gate_document("Total 12.00\n")
-
-    assert report["hard_counters"] == []
+def test_ambiguous_money_documents_are_not_sent_to_receipt_extraction(text):
+    report = classify_document(text)
+    assert report["document_type"] == "unknown"
     assert report["is_receipt_invoice"] is False
-    assert report["blocked_by"]
+    with pytest.raises(RuntimeError, match="unsupported document type: unknown"):
+        gate_document(text)
+
+
+def test_a_low_score_document_is_not_sent_to_receipt_extraction():
+    report = classify_document("Total 12.00\n")
+    assert report["document_type"] == "unknown"
+    assert report["hard_counters"] == []
+    with pytest.raises(RuntimeError, match="unsupported document type: unknown"):
+        gate_document("Total 12.00\n")
 
 
 @pytest.mark.parametrize(
@@ -101,10 +99,13 @@ def test_a_low_score_receipt_is_not_rejected():
     ],
 )
 def test_hard_counter_documents_are_rejected(text, name):
+    report = classify_document(text)
+    assert name in report["hard_counters"]
+    assert report["document_type"] == "unknown"
     with pytest.raises(RuntimeError) as error:
         gate_document(text)
 
-    assert name in str(error.value)
+    assert "unsupported document type: unknown" in str(error.value)
 
 
 def test_gate_rejects_even_when_a_resume_also_looks_invoice_like():
@@ -117,24 +118,27 @@ def test_gate_rejects_even_when_a_resume_also_looks_invoice_like():
         "Invoice No: INV-9  Total 4500.00 GST 500.00 Due Date 30 days\n"
     )
 
+    report = classify_document(text)
+    assert "resume_or_cv" in report["hard_counters"]
     with pytest.raises(RuntimeError) as error:
         gate_document(text)
 
-    assert "resume_or_cv" in str(error.value)
+    assert "unsupported document type: unknown" in str(error.value)
 
 
-def test_a_bank_statement_is_not_vetoed():
-    # bank_statement is a soft counter: a statement that is really a
-    # payment confirmation must still be extracted.
-    report = gate_document(
+def test_a_bank_statement_with_ambiguous_totals_is_not_sent_to_receipt_extraction():
+    text = (
         "AXIS BANK\nStatement of Account\n"
         "Date Description Withdrawal Deposit Balance\n"
         "01/03/2024 ATM WITHDRAWAL 5,000.00 45,000.00\n"
         "Total 189.00\n"
     )
-
+    report = classify_document(text)
     assert report["counters"] == ["bank_statement"]
     assert report["hard_counters"] == []
+    assert report["document_type"] == "unknown"
+    with pytest.raises(RuntimeError, match="unsupported document type: unknown"):
+        gate_document(text)
 
 
 def test_document_fields_default_to_none():
@@ -162,9 +166,8 @@ def test_classifier_report_is_passed_through_unchanged():
     assert gated["hard_counters"] == report["hard_counters"]
 
 
-def test_a_weak_but_forwardable_document_is_reported_at_the_floor():
-    """A low-scoring money document still reaches the LLM, so report 0.50."""
-
+def test_a_weak_document_is_not_sent_to_receipt_extraction():
+    """A weak signal remains unknown without an affirmative classifier result."""
     weak = (
         "UPI\n"
         "POWEHED HY\n"
@@ -173,12 +176,11 @@ def test_a_weak_but_forwardable_document_is_reported_at_the_floor():
     )
 
     raw = classify_document(weak)
-    assert raw["confidence"] < MIN_FORWARDED_CONFIDENCE
+    assert raw["confidence"] < 0.5
     assert raw["hard_counters"] == []
 
-    report = gate_document(weak)
-
-    assert report["confidence"] == MIN_FORWARDED_CONFIDENCE
+    with pytest.raises(RuntimeError, match="unsupported document type: unknown"):
+        gate_document(weak)
 
 
 def test_business_cards_are_rejected():
@@ -201,7 +203,8 @@ def test_business_cards_are_rejected():
         assert "business_card" in report["hard_counters"]
         assert report["is_receipt_invoice"] is False
 
-        with pytest.raises(RuntimeError, match="business_card"):
+        assert report["document_type"] == "unknown"
+        with pytest.raises(RuntimeError, match="unsupported document type: unknown"):
             gate_document(card)
 
 
